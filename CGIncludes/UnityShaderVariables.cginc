@@ -126,35 +126,42 @@
 
     // ********** END **********
     // ----------------------------------------------------------------------------
-
+    // ********** 与光照相关的工具函数和内置光源 **********
     CBUFFER_START(UnityLighting)
 
     #ifdef USING_DIRECTIONAL_LIGHT
+        // x、y、z存储的有向平行光的方向向量
         half4 _WorldSpaceLightPos0;
     #else
+        // x、y、z存储光源在世界空间中的位置坐标
         float4 _WorldSpaceLightPos0;
     #endif
 
-    float4 _LightPositionRange; // xyz = pos, w = 1/range
+    float4 _LightPositionRange; // xyz = pos, w = 1/range      // 光源位置 + 范围的倒数
     float4 _LightProjectionParams; // for point light projection: x = zfar / (znear - zfar), y = (znear * zfar) / (znear - zfar), z=shadow bias, w=shadow scale bias
 
+    // 四个仅用在前向渲染途径的base pass中的非重要点光源的位置
     float4 unity_4LightPosX0;
     float4 unity_4LightPosY0;
     float4 unity_4LightPosZ0;
+    // 与之对应的衰减
     half4 unity_4LightAtten0;
 
+    // 8个光源的颜色、位置、衰减、照射方向
     half4 unity_LightColor[8];
-
-
+    // 在观察空间点光源的位置（position, 1）或者有向平行光的（负）方向（-direction, 0）
     float4 unity_LightPosition[8]; // view-space vertex light positions (position,1), or (-direction,0) for directional lights.
-    // x = cos(spotAngle/2) or -1 for non-spot
-    // y = 1/cos(spotAngle/4) or 1 for non-spot
-    // z = quadratic attenuation
-    // w = range*range
+    // x = cos(spotAngle/2) or -1 for non-spot      
+    // y = 1/cos(spotAngle/4) or 1 for non-spot     // 原注释是错误的 正确的是：聚光灯1/4张角的余弦值减去其1/2张角的余弦值，如果该值不为0，则y为该差值的倒数，否则为1SHADOWS_SHADOWMASK
+    // z = quadratic attenuation                    // 衰减公式的2次项系数
+    // w = range*range                  
+    // 光源的衰减信息
     half4 unity_LightAtten[8];
+    // 观察空间的光源正前照射方向 如果不是聚光 -> (0,0,1,0)
     float4 unity_SpotDirection[8]; // view-space spot light directions, or (0,0,1,0) for non-spot
 
     // SH lighting environment
+    // 球谐函数使用到的参数
     half4 unity_SHAr;
     half4 unity_SHAg;
     half4 unity_SHAb;
@@ -164,34 +171,63 @@
     half4 unity_SHC;
 
     // part of Light because it can be used outside of shadow distance
+    // 光照探针相关的参数
     fixed4 unity_OcclusionMaskSelector;
     fixed4 unity_ProbesOcclusion;
     CBUFFER_END
 
+    // 从4.0版本已经弃用，之所以保留是为了兼容使用了他们的着色器
     CBUFFER_START(UnityLightingOld)
     half3 unity_LightColor0, unity_LightColor1, unity_LightColor2, unity_LightColor3; // keeping those only for any existing shaders; remove in 4.0
     CBUFFER_END
 
-
+    // ********** END **********
     // ----------------------------------------------------------------------------
+    // ********** 与阴影相关的着色器常量缓冲区 **********
 
     CBUFFER_START(UnityShadows)
-    float4 unity_ShadowSplitSpheres[4];
-    float4 unity_ShadowSplitSqRadii;
-    float4 unity_LightShadowBias;
+    // 用于构建层叠式阴影贴图时子视截体用到的包围球
+    // 该数组中的4个元素存储了当前视截体分割成4个子视截体后，这些视截体的包围球
+    // x、y、z、w分别存储了包围球的球心半径和坐标
+    float4 unity_ShadowSplitSpheres[4];     
+    // unity_ShadowSplitSpheres中四个包围球半径的平方
+    float4 unity_ShadowSplitSqRadii;        
+    // x分量表示产生阴影的光源的光源偏移值乘以的系数，这个光源偏移值对应于Light面板中的Bias属性。
+    // 如果是聚光灯光源，所乘系数为1，如果是平行光，所乘系数为投影矩阵的第三行第三列的值的相反数。
+    // y分量，如果是聚光灯光源时，为0，有向平行光时，为1。
+    // z分量为解决阴影渗漏问题是，沿着物体表面法线移动的偏移量。
+    // w分量为0。
+    float4 unity_LightShadowBias;    
+    // 对应于 Project Setting/Quality/Shadows面板中的cascade split属性里面，
+    // 当把视截体分割成最多4个子视截体时，每个子视截体的近截平面的z值。       
     float4 _LightSplitsNear;
+    // 分割成4个子视截体时，每个子视截体的远截平面的z值。
     float4 _LightSplitsFar;
+    // 把某个坐标点从世界空间变换到阴影贴图空间的变换矩阵，
+    // 如果使用层叠式阴影贴图数组，各元素就对应于层叠式贴图中每一个子视截体对应的阴影贴图，
+    // 存储了从世界坐标变换到阴影贴图空间中的变换坐标（变换矩阵吧？）。
+    // 阴影贴图空间 -> 层叠式阴影技术中，每一个子视截体所对应的阴影贴图所构建的空间。
+    // 可以近似理解为一个由纹理映射坐标做成的坐标空间，坐标取值范围时[0, 1]。
+    // 世界坐标 -> * 观察矩阵 * 投影矩阵 -> 裁剪空间坐标（[-1, 1]） * 贴图变换矩阵 -> 阴影贴图空间（[0, 1]）
     float4x4 unity_WorldToShadow[4];
+    // x分量表示阴影强度，1表示全黑，0表示完全透明不黑
+    // y分量暂未使用
+    // 当z分量为1除以要渲染的阴影时，表示阴影离当前摄像机的最远距离值
+    // w分量表示阴影离摄像机的最近距离值
     half4 _LightShadowData;
+    // 阴影的中心和阴影的类型
     float4 unity_ShadowFadeCenterAndType;
     CBUFFER_END
 
+    // ********** END **********
     // ----------------------------------------------------------------------------
 
+    // 与逐帧绘制调用相关的着色器常量缓冲区
     CBUFFER_START(UnityPerDraw)
-    float4x4 unity_ObjectToWorld;
-    float4x4 unity_WorldToObject;
+    float4x4 unity_ObjectToWorld;       // 把顶点从模型空间变换到世界空间
+    float4x4 unity_WorldToObject;       // 把顶点从世界空间变换到模型空间
     float4 unity_LODFade; // x is the fade value ranging within [0,1]. y is x quantized into 16 levels
+    // 该变量的w分量通常为1，当缩放变量为负数时，常被引擎赋值为-1
     float4 unity_WorldTransformParams; // w is usually 1.0, or -1.0 for odd-negative scale transforms
     float4 unity_RenderingLayer;
     CBUFFER_END
@@ -276,12 +312,14 @@
     // ********** END **********
     // ----------------------------------------------------------------------------
 
+    // 与雾效果相关的常量缓冲区
     CBUFFER_START(UnityFog)
-    fixed4 unity_FogColor;
-    // x = density / sqrt(ln(2)), useful for Exp2 mode
-    // y = density / ln(2), useful for Exp mode
-    // z = -1/(end-start), useful for Linear mode
-    // w = end/(end-start), useful for Linear mode
+    fixed4 unity_FogColor;      // 雾的颜色
+    // x = density / sqrt(ln(2)), useful for Exp2 mode      // 用于雾化因子指数平方衰减
+    // y = density / ln(2), useful for Exp mode             // 用于雾化因子指数衰减
+    // z = -1/(end-start), useful for Linear mode           // 用于雾化因子线性衰减
+    // w = end/(end-start), useful for Linear mode          // 用于雾化因子线性衰减
+    // 雾化的衰减因子相关信息
     float4 unity_FogParams;
     CBUFFER_END
 
@@ -290,32 +328,41 @@
     // Lightmaps
 
     // Main lightmap
+    // 声明了主光照贴图，记录了直接照明下的光照信息
     UNITY_DECLARE_TEX2D_HALF(unity_Lightmap);
     // Directional lightmap (always used with unity_Lightmap, so can share sampler)
+    // 声明了间接照明所产生的光照信息，因为unity_LightmapInd和unity_Lightmap搭配使用，所以不用另外专门声明采样器
     UNITY_DECLARE_TEX2D_NOSAMPLER_HALF(unity_LightmapInd);
     // Shadowmasks
+    // 定义一个unity_ShadowMask纹理贴图
     UNITY_DECLARE_TEX2D(unity_ShadowMask);
 
     // Dynamic GI lightmap
+    // 和全局光照贴图相关的变量
     UNITY_DECLARE_TEX2D(unity_DynamicLightmap);
     UNITY_DECLARE_TEX2D_NOSAMPLER(unity_DynamicDirectionality);
     UNITY_DECLARE_TEX2D_NOSAMPLER(unity_DynamicNormal);
 
     CBUFFER_START(UnityLightmaps)
-    float4 unity_LightmapST;
-    float4 unity_DynamicLightmapST;
+    float4 unity_LightmapST;            // 用于静态光照贴图 tiling 和 offset
+    float4 unity_DynamicLightmapST;     // 用于动态光照贴图 tiling 和 offset
     CBUFFER_END
 
 
     // ----------------------------------------------------------------------------
-    // Reflection Probes
-
-    UNITY_DECLARE_TEXCUBE(unity_SpecCube0);
-    UNITY_DECLARE_TEXCUBE_NOSAMPLER(unity_SpecCube1);
+    // Reflection Probes  和反射探针相关的着色器变量
+    
+    UNITY_DECLARE_TEXCUBE(unity_SpecCube0);                 // 声明一个立方体贴图（在Direct3D 11或XBoxOne还会声明一个采样器变量）
+    UNITY_DECLARE_TEXCUBE_NOSAMPLER(unity_SpecCube1);       // 声明立方体贴图纹理，但是不声明采样器变量
 
     CBUFFER_START(UnityReflectionProbes)
+    // 反射探针的作用区域立方体试一个和世界坐标系坐标轴轴对齐的包围盒
+
+    // x、y、z分量存储了该包围盒在x、y、z轴方向上的最大边界值
     float4 unity_SpecCube0_BoxMax;
+    // ...最小边界值
     float4 unity_SpecCube0_BoxMin;
+    // ReflectionProbe组件中的光照探针位置，由transform组件的Position属性和BoxOffset属性计算而来
     float4 unity_SpecCube0_ProbePosition;
     half4  unity_SpecCube0_HDR;
 

@@ -434,6 +434,7 @@
 #endif
 
     // Cubemaps
+    // 立方体纹理
     #define UNITY_DECLARE_TEXCUBE(tex) TextureCube tex; SamplerState sampler##tex
     #define UNITY_ARGS_TEXCUBE(tex) TextureCube tex, SamplerState sampler##tex
     #define UNITY_PASS_TEXCUBE(tex) tex, sampler##tex
@@ -505,6 +506,7 @@
     #define UNITY_SAMPLE_TEX2D(tex,coord) tex2D (tex,coord)
     #define UNITY_SAMPLE_TEX2D_SAMPLER(tex,samplertex,coord) tex2D (tex,coord)
     // Cubemaps
+    // 立方体纹理
     #define UNITY_DECLARE_TEXCUBE(tex) samplerCUBE tex
     #define UNITY_ARGS_TEXCUBE(tex) samplerCUBE tex
     #define UNITY_PASS_TEXCUBE(tex) tex
