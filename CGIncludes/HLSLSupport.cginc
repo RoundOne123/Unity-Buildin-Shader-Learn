@@ -608,14 +608,15 @@
 #endif
 
 #if defined(SHADER_API_D3D11) || defined(SHADER_API_PSSL) || defined(SHADER_API_XBOXONE) || defined(SHADER_API_METAL) || defined(SHADER_API_VULKAN) || defined(SHADER_API_SWITCH)
+// D3D11、PlayStation、XboxOne、Metal、Vulkan、Switch 平台上逆转裁剪空间的 near-far 取值，即near 值为 1，far 为 0
 // D3D style platforms where clip space z is [0, 1].
 #define UNITY_REVERSED_Z 1
 #endif
 
 #if defined(UNITY_REVERSED_Z)
-#define UNITY_NEAR_CLIP_VALUE (1.0)
+#define UNITY_NEAR_CLIP_VALUE (1.0)      // near 值为 1，far 值为 0
 #else
-#define UNITY_NEAR_CLIP_VALUE (-1.0)
+#define UNITY_NEAR_CLIP_VALUE (-1.0)     // 其他平台，如 OpenGL（ES）平台保持 near 值为-1，far 值为 1
 #endif
 
 // "platform caps" defines that were moved to editor, so they are set automatically when compiling shader

@@ -780,7 +780,18 @@
     // ********** END **********
 
     // ********** 法线贴图及其编解码操作的函数 **********
+    /*
+    DXT是一种纹理压缩格式,以前称为S3TC当前很多图形硬件已经支持这种格式,
+    即在显存中依然保持着压缩格式,从而减少显存占用量。
+    目前有DXT1 ~ 5[5]这5种编码格式,在DirectX10及后续版本中,这系列格式称为块状压缩(块压缩),
+    所以DXT1称为群体BC1、DXT2 ~ 3称为BC2、DXT4 ~ 5称为BC3。
+    要使用 DXT 格式压缩图像，要求图像大小至少是 4×4 纹素，而且图像高宽的纹素个数是 2 的整数次幂，
+    如 32×32、64×128 等。
+    DXT5nm 格式和 BC5 格式类似，当把一个法线存储进 DXT5nm 或者 BC5 格式的法线贴图时，
+    该贴图的 RGBA 纹素的各个通道对应存储的法线的分量是（1，y,1,x）或（x,y,0,1）。
+    */
 
+    // 解码DXT5nm格式的法线贴图
     inline fixed3 UnpackNormalDXT5nm (fixed4 packednormal)
     {
         fixed3 normal;
@@ -791,21 +802,27 @@
 
     // Unpack normal as DXT5nm (1, y, 1, x) or BC5 (x, y, 0, 1)
     // Note neutral texture like "bump" is (0, 0, 1, 1) to work with both plain RGB normal and DXT5nm/BC5
+    // 请注意，“bump”之类的中性纹理为（0、0、1、1），可以与普通RGB普通色和DXT5nm / BC5一起使用
+    // 能够处理DXT5nm和BC5两种格式的法线贴图，并正确地把法线扰动向量从纹素中解码出来
     fixed3 UnpackNormalmapRGorAG(fixed4 packednormal)
     {
         // This do the trick
+        // 确保无论是哪个压缩格式，packednormal的x分量最后值就是扰动向量的x
         packednormal.x *= packednormal.w;
 
         fixed3 normal;
-        normal.xy = packednormal.xy * 2 - 1;
+        normal.xy = packednormal.xy * 2 - 1;    // [0,1] -> [-1,1]
         normal.z = sqrt(1 - saturate(dot(normal.xy, normal.xy)));
         return normal;
     }
     inline fixed3 UnpackNormal(fixed4 packednormal)
     {
         #if defined(UNITY_NO_DXT5nm)
+            // 不使用DXT5nm格式去压缩法线贴图
+            // 只需要把表示颜色的[0,1]范围映射到表示向量的[-1,1]范围即可
             return packednormal.xyz * 2 - 1;
         #else
+            // 使用了DXT5nm或者BC5压缩格式的法线纹理贴图
             return UnpackNormalmapRGorAG(packednormal);
         #endif
     }
@@ -825,19 +842,32 @@
 
     // ********** END **********
     
-
+    // 线性化深度值的工具函数
     // Z buffer to linear 0..1 depth
+    // 把从深度纹理中取得的顶点深度值z变换到观察空间中（一个线性区域），然后映射到[0,1]区间内，下面得公式需要推导
+    // _ZBufferParams.x -> 1 - 视截体远截面值与近截面值得商
+    // _ZBufferParams.y -> 视截体远截面值与近截面值得商
     inline float Linear01Depth( float z )
     {
         return 1.0 / (_ZBufferParams.x * z + _ZBufferParams.y);
     }
     // Z buffer to linear depth
+    // 把从深度纹理中取得的深度值z变换到观察空间中  并没有映射到[0,1]区间内
+    // _ZBufferParams.w -> y分量除以视截体远截面值
     inline float LinearEyeDepth( float z )
     {
         return 1.0 / (_ZBufferParams.z * z + _ZBufferParams.w);
     }
 
+    // ********** 合并单程立体渲染时的左右眼图像到一张纹理的函数 **********
 
+    /*
+    使用 C#层运行期 API 函数 Graphics.Blit()函数进行后处理效果（post-processing effect）时，
+    如果启用了单程立体渲染，则 Blit 函数中用到的纹理采样器（texture sampler）是不能自动地
+    在由两个左右眼图像合并而成的可渲染纹理中进行定位采样的。所以，如果要正确使用该可渲染纹理，
+    需要告诉着色器在采样左（右）眼对应的纹理内容时要做多少缩放和偏移。
+    UnityStereoScreenSpaceUVAdjustInternal函数就是用来做这件事情的
+    */
     inline float2 UnityStereoScreenSpaceUVAdjustInternal(float2 uv, float4 scaleAndOffset)
     {
         return uv.xy * scaleAndOffset.xy + scaleAndOffset.zw;
@@ -851,6 +881,7 @@
     #define UnityStereoScreenSpaceUVAdjust(x, y) UnityStereoScreenSpaceUVAdjustInternal(x, y)
 
     #if defined(UNITY_SINGLE_PASS_STEREO)
+        // 对单程立体渲染用到的左右眼图像，放到一张可渲染纹理的左右两边时要做的缩放和偏移操作
         float2 TransformStereoScreenSpaceTex(float2 uv, float w)
         {
             float4 scaleOffset = unity_StereoScaleOffset[unity_StereoEyeIndex];
@@ -862,54 +893,76 @@
             return TransformStereoScreenSpaceTex(saturate(uv), 1.0);
         }
 
+        // 把两组 uv 坐标打包进一个 float4 类型的参数
+        // 并把返回结果值打包进 float4 类型变量中返回
         inline float4 UnityStereoTransformScreenSpaceTex(float4 uv)
         {
             return float4(UnityStereoTransformScreenSpaceTex(uv.xy), UnityStereoTransformScreenSpaceTex(uv.zw));
         }
+
+        // scaleAndOffset 的 x、y 分量包含对纹理的缩放操作参数，z、w 分量包含对纹理的偏移操作参数。
+        // 本函数把原始的 uv 坐标的 u 分量限定在缩放范围内
         inline float2 UnityStereoClamp(float2 uv, float4 scaleAndOffset)
         {
+            // uv.x 限定在 scaleAndOffset.z 到 scaleAndOffset.z + scaleAndOffset.x 范围内
             return float2(clamp(uv.x, scaleAndOffset.z, scaleAndOffset.z + scaleAndOffset.x), uv.y);
         }
     #else
+        // 如果不使用单程立体渲染，则前面定义的函数不做任何操作
         #define TransformStereoScreenSpaceTex(uv, w) uv
         #define UnityStereoTransformScreenSpaceTex(uv) uv
         #define UnityStereoClamp(uv, scaleAndOffset) uv
     #endif
 
+    // ********** END **********
+
+
+    // ********** 操作深度纹理的工具宏 **********
+
     // Depth render texture helpers
     #define DECODE_EYEDEPTH(i) LinearEyeDepth(i)
+    // 取得模型空间的顶点到观察空间中的z值 并取其相反数
     #define COMPUTE_EYEDEPTH(o) o = -UnityObjectToViewPos( v.vertex ).z
+    // 取得模型空间的顶点到观察空间中的z值，取反，并映射到[0,1]范围，
     #define COMPUTE_DEPTH_01 -(UnityObjectToViewPos( v.vertex ).z * _ProjectionParams.w)
+    // 把顶点法线，从模型空间变换到观察空间
     #define COMPUTE_VIEW_NORMAL normalize(mul((float3x3)UNITY_MATRIX_IT_MV, v.normal))
 
-    // Helpers used in image effects. Most image effects use the same
-    // minimal vertex shader (vert_img).
+    // ********** END **********
 
+    // ********** 用来实现图像效果的工具函数和预定义结构体 ********** 
+    // Helpers used in image effects. Most image effects use the same minimal vertex shader (vert_img).
+    //图像效果中使用的辅助对象。 大多数图像效果使用相同的最小顶点着色器（vert_img）。
+
+    // 顶点着色器用到的一些简单的顶点描述结构
     struct appdata_img
     {
-        float4 vertex : POSITION;
-        half2 texcoord : TEXCOORD0;
-        UNITY_VERTEX_INPUT_INSTANCE_ID
+        float4 vertex : POSITION;           // 顶点的齐次化位置坐标（就是模型空间的顶点坐标吧）
+        half2 texcoord : TEXCOORD0;         // 顶点用到的第一层纹理映射坐标
+        UNITY_VERTEX_INPUT_INSTANCE_ID      // 硬件instance id值
     };
 
+    // 从顶点着色器返回，传递给片元着色器使用
     struct v2f_img
     {
-        float4 pos : SV_POSITION;
+        float4 pos : SV_POSITION;           // 要传递给片元着色器的顶点坐标，已转换到裁剪空间中
         half2 uv : TEXCOORD0;
         UNITY_VERTEX_INPUT_INSTANCE_ID
-        UNITY_VERTEX_OUTPUT_STEREO
+        UNITY_VERTEX_OUTPUT_STEREO          // 立体渲染时的左右眼索引（此宏在UnityInstancing.cginc文件中定义）
     };
 
+    // 将uv坐标从一个空间变换到另一个空间（右乘一个变换矩阵）
     float2 MultiplyUV (float4x4 mat, float2 inUV) {
         float4 temp = float4 (inUV.x, inUV.y, 0, 0);
         temp = mul (mat, temp);
         return temp.xy;
     }
 
+    // 大多数图像效果使用的相同最小顶点着色器入口函数
     v2f_img vert_img( appdata_img v )
     {
         v2f_img o;
-        UNITY_INITIALIZE_OUTPUT(v2f_img, o);
+        UNITY_INITIALIZE_OUTPUT(v2f_img, o);    // -> v2f_img = (o)0;
         UNITY_SETUP_INSTANCE_ID(v);
         UNITY_INITIALIZE_VERTEX_OUTPUT_STEREO(o);
 
@@ -918,16 +971,24 @@
         return o;
     }
 
+    // ********** END **********
+
+
+    // ********** 计算屏幕坐标的工具函数 **********
     // Projected screen position helpers
     #define V2F_SCREEN_TYPE float4
 
+    // pos：-> 裁剪空间中的一个齐次坐标值，易知此时的pos.x与pos.y的取值范围是[-pos.w，pos.w]
+    // （不使用立体渲染时，该方法才有效）
+    // 将裁剪空间中的齐次坐标的x、y值变换到[0,pos.w]范围内（并没有生成在屏幕坐标系下的坐标值）
     inline float4 ComputeNonStereoScreenPos(float4 pos) {
-        float4 o = pos * 0.5f;
+        float4 o = pos * 0.5f;      // 将pos坐标取值范围缩小
         o.xy = float2(o.x, o.y*_ProjectionParams.x) + o.w;
         o.zw = pos.zw;
         return o;
     }
 
+    // 限制裁剪空间的齐次坐标pos值（x、y分量变换到[0,pos.w]），并在立体渲染时进行缩放和偏移
     inline float4 ComputeScreenPos(float4 pos) {
         float4 o = ComputeNonStereoScreenPos(pos);
         #if defined(UNITY_SINGLE_PASS_STEREO)
@@ -936,14 +997,24 @@
         return o;
     }
 
+    // 当把当前屏幕内容截屏并保存在一个目标纹理时，计算裁剪空间中某一点将会对应保存在目标纹理中的哪一点？？？
+    // pos：基于裁剪空间的齐次坐标
+    // 传递进来在裁剪空间中某点的齐次坐标值，返回该点在目标纹理中的【纹理贴图坐标】
+    // 疑问，纹理贴图坐标不应该是[0,1]嘛？ 这里为什么纹理坐标可以是 [0, pos.w]
+    // 所以这里的纹理坐标怎么理解？需要再除pos.w分量？有这么算的嘛？
     inline float4 ComputeGrabScreenPos (float4 pos) {
+        //将给定的裁剪空间的pos，根据不同的平台，将pos的x，y分量分别限定在相应的范围内
+        // scale = -1.0，pos.x -> [0, pos.w], pos.y -> [pos.w, 0]  // 注意为-1.0时 范围没变，只是顺序变了
+        // scale = 1.0, pos.x -> [0, pos.w], pos.x -> [0, pos.w]
         #if UNITY_UV_STARTS_AT_TOP
             float scale = -1.0;
         #else
             float scale = 1.0;
         #endif
         float4 o = pos * 0.5f;
-        o.xy = float2(o.x, o.y*scale) + o.w;
+        o.xy = float2(o.x, o.y*scale) + o.w;    
+
+        // 单程立体渲染 -> 进一步处理tilling、offset
         #ifdef UNITY_SINGLE_PASS_STEREO
             o.xy = TransformStereoScreenSpaceTex(o.xy, pos.w);
         #endif
@@ -952,30 +1023,43 @@
     }
 
     // snaps post-transformed position to screen pixels
+    // 真正把视口坐标（裁剪空间齐次坐标？？）转换为屏幕像素坐标的函数
+    // 这里的pos参数，是什么？ComputeNonStereoScreenPos限定过的，还是裁剪空间的齐次坐标？还是视口坐标
     inline float4 UnityPixelSnap (float4 pos)
     {
+        // 屏幕宽高的一半
         float2 hpc = _ScreenParams.xy * 0.5f;
         #if  SHADER_API_PSSL
             // sdk 4.5 splits round into v_floor_f32(x+0.5) ... sdk 5.0 uses v_rndne_f32, for compatabilty we use the 4.5 version
+            // sdk 4.5拆分为v_floor_f32（x + 0.5）... sdk 5.0使用v_rndne_f32，为了兼容，我们使用4.5版本
+            // 透视除法 * 屏幕的高、宽 
+            // 为什么 +  float2(0.5f,0.5f);  放到像素的中间位置？解决半像素偏移问题？
             float2 temp = ((pos.xy / pos.w) * hpc) + float2(0.5f,0.5f);
             float2 pixelPos = float2(__v_floor_f32(temp.x), __v_floor_f32(temp.y));
         #else
-            float2 pixelPos = round ((pos.xy / pos.w) * hpc);
+            float2 pixelPos = round ((pos.xy / pos.w) * hpc);   // 四舍五入取整
         #endif
+        // 这里又是什么意思呢？
         pos.xy = pixelPos / hpc * pos.w;
         return pos;
     }
 
+    // 将向量从观察空间变换到裁剪空间
     inline float2 TransformViewToProjection (float2 v) {
         return mul((float2x2)UNITY_MATRIX_P, v);
     }
 
+    // 将向量从观察空间变换到裁剪空间
     inline float3 TransformViewToProjection (float3 v) {
         return mul((float3x3)UNITY_MATRIX_P, v);
     }
 
+    // ********** END **********
+
+    // ********** 与阴影处理相关的工具函数 **********
     // Shadow caster pass helpers
 
+    // 把一个float类型的阴影深度值编码进一个float4类型的RGBA数值中
     float4 UnityEncodeCubeShadowDepth (float z)
     {
         #ifdef UNITY_USE_RGBA_FOR_POINT_SHADOWS
@@ -985,6 +1069,7 @@
         #endif
     }
 
+    // 把一个float4类型的阴影深度值解码到一个float类型的浮点数中
     float UnityDecodeCubeShadowDepth (float4 vals)
     {
         #ifdef UNITY_USE_RGBA_FOR_POINT_SHADOWS
@@ -994,14 +1079,20 @@
         #endif
     }
 
-
+    // 将阴影投射者（shadow caster）的坐标沿着其法线做了一定偏移之后再变换至裁剪空间。
+    // 根据法线与光线的夹角的正弦值，计算得到用于消除阴影渗漏的合适的偏移值，并将vertex沿法线方向偏移
+    // vertex：模型空间顶点的位置
+    // normal：模型空间法线的位置
     float4 UnityClipSpaceShadowCasterPos(float4 vertex, float3 normal)
     {
+        // 世界空间顶点坐标
         float4 wPos = mul(unity_ObjectToWorld, vertex);
 
         if (unity_LightShadowBias.z != 0.0)
-        {
+        {   
+            // 世界空间法线
             float3 wNormal = UnityObjectToWorldNormal(normal);
+            // 归一化后的世界空间光线方向
             float3 wLight = normalize(UnityWorldSpaceLightDir(wPos.xyz));
 
             // apply normal offset bias (inset position along the normal)
@@ -1010,33 +1101,47 @@
             //
             // unity_LightShadowBias.z contains user-specified normal offset amount
             // scaled by world space texel size.
+            // unity_LightShadowBias.z包含用户指定的标准偏移量，该偏移量通过世界空间纹理像素大小缩放。
 
+            // 法线与光线的夹角的三角函数值
             float shadowCos = dot(wNormal, wLight);
             float shadowSine = sqrt(1-shadowCos*shadowCos);
+            // 计算偏移量
             float normalBias = unity_LightShadowBias.z * shadowSine;
 
+            // 把顶点坐标，沿法线方向进行偏移
             wPos.xyz -= wNormal * normalBias;
         }
-
+        
+        // 将偏移后的值变换回裁剪空间
         return mul(UNITY_MATRIX_VP, wPos);
     }
     // Legacy, not used anymore; kept around to not break existing user shaders
+    // 遗留的方法
     float4 UnityClipSpaceShadowCasterPos(float3 vertex, float3 normal)
     {
         return UnityClipSpaceShadowCasterPos(float4(vertex, 1), normal);
     }
 
-
+    
+    /*
+    该函数将调用 UnityClipSpaceShadowCasterPos 函数得到的裁剪空间坐标的z值再做一定的增加
+    因为这个增加操作是在裁剪空间这样的齐次坐标系下进行的所以要对透视投影产生的z值进行补偿，
+    使得阴影偏移值不会随着与摄像机的距离的变化而变化，
+    同时必须保证增加的z值不能超出裁剪空间的远近截面z值。
+    */
     float4 UnityApplyLinearShadowBias(float4 clipPos)
-
     {
         // For point lights that support depth cube map, the bias is applied in the fragment shader sampling the shadow map.
         // This is because the legacy behaviour for point light shadow map cannot be implemented by offseting the vertex position
         // in the vertex shader generating the shadow map.
+        // 对于支持深度立方体贴图的点光源，在对阴影贴图进行采样的【片段着色器】中应用该偏差。
+        // 这是因为无法通过偏移生成阴影贴图的顶点着色器中的顶点位置来实现点光源阴影贴图的传统行为。
         #if !(defined(SHADOWS_CUBE) && defined(SHADOWS_CUBE_IN_DEPTH_TEX))
             #if defined(UNITY_REVERSED_Z)
                 // We use max/min instead of clamp to ensure proper handling of the rare case
                 // where both numerator and denominator are zero and the fraction becomes NaN.
+                // 我们使用max / min代替clamp，以确保正确处理分子和分母均为零且分数变为NaN（非数或不可表示的值）的罕见情况。
                 clipPos.z += max(-1, min(unity_LightShadowBias.x / clipPos.w, 0));
             #else
                 clipPos.z += saturate(unity_LightShadowBias.x/clipPos.w);
@@ -1048,6 +1153,7 @@
         #else
             float clamped = max(clipPos.z, clipPos.w*UNITY_NEAR_CLIP_VALUE);
         #endif
+        // 根据第一次增加后的z值和z的极值，进行线性插值
         clipPos.z = lerp(clipPos.z, clamped, unity_LightShadowBias.y);
         return clipPos;
     }
@@ -1055,38 +1161,52 @@
 
     #if defined(SHADOWS_CUBE) && !defined(SHADOWS_CUBE_IN_DEPTH_TEX)
         // Rendering into point light (cubemap) shadows
+        // 渲染由点光源产生的立方体阴影
+
+        // 用来存储在世界坐标系下当前顶点到光源位置的连线向量
         #define V2F_SHADOW_CASTER_NOPOS float3 vec : TEXCOORD0;
         #define TRANSFER_SHADOW_CASTER_NOPOS_LEGACY(o,opos) o.vec = mul(unity_ObjectToWorld, v.vertex).xyz - _LightPositionRange.xyz; opos = UnityObjectToClipPos(v.vertex);
+        // _LightPositionRange x、y、z 分量为光源的位置，w分量为光源的照射范围的倒数，
+        // 计算在世界坐标系下当前顶点到光源位置的连线向量，同时把顶点位置变换到裁剪空间。
         #define TRANSFER_SHADOW_CASTER_NOPOS(o,opos) o.vec = mul(unity_ObjectToWorld, v.vertex).xyz - _LightPositionRange.xyz; opos = UnityObjectToClipPos(v.vertex);
+        // 把一个 float 类型的阴影深度值编码到一个 float4 类型中并返回
         #define SHADOW_CASTER_FRAGMENT(i) return UnityEncodeCubeShadowDepth ((length(i.vec) + unity_LightShadowBias.x) * _LightPositionRange.w);
 
     #else
         // Rendering into directional or spot light shadows
+        // 渲染由平行光或者聚光灯光源产生的阴影
+
         #define V2F_SHADOW_CASTER_NOPOS
         // Let embedding code know that V2F_SHADOW_CASTER_NOPOS is empty; so that it can workaround
         // empty structs that could possibly be produced.
+        // 让嵌入代码知道V2F_SHADOW_CASTER_NOPOS为空； 这样就可以解决可能产生的空结构。
         #define V2F_SHADOW_CASTER_NOPOS_IS_EMPTY
         #define TRANSFER_SHADOW_CASTER_NOPOS_LEGACY(o,opos) \
-        opos = UnityObjectToClipPos(v.vertex.xyz); \
-        opos = UnityApplyLinearShadowBias(opos);
+        opos = UnityObjectToClipPos(v.vertex.xyz); \    // 模型空间 -> 裁剪空间
+        opos = UnityApplyLinearShadowBias(opos);        // 裁剪空间坐标z值做一定的增加
         #define TRANSFER_SHADOW_CASTER_NOPOS(o,opos) \
-        opos = UnityClipSpaceShadowCasterPos(v.vertex, v.normal); \
+        opos = UnityClipSpaceShadowCasterPos(v.vertex, v.normal); \     
         opos = UnityApplyLinearShadowBias(opos);
         #define SHADOW_CASTER_FRAGMENT(i) return 0;
     #endif
 
     // Declare all data needed for shadow caster pass output (any shadow directions/depths/distances as needed),
     // plus clip space position.
+    // 声明阴影投射器pass输出所需的所有数据（所需的任何阴影方向/深度/距离）以及剪辑空间位置。
     #define V2F_SHADOW_CASTER V2F_SHADOW_CASTER_NOPOS UNITY_POSITION(pos)
 
     // Vertex shader part, with support for normal offset shadows. Requires
     // position and normal to be present in the vertex input.
+    // 顶点着色器部件，支持普通的偏移阴影。 要求位置和法线出现在顶点输入中。
     #define TRANSFER_SHADOW_CASTER_NORMALOFFSET(o) TRANSFER_SHADOW_CASTER_NOPOS(o,o.pos)
 
     // Vertex shader part, legacy. No support for normal offset shadows - because
     // that would require vertex normals, which might not be present in user-written shaders.
+    // 顶点着色器部分，旧版。 
+    // 不支持法线偏移阴影-因为这将需要顶点法线，而在用户编写的着色器中可能不存在。
     #define TRANSFER_SHADOW_CASTER(o) TRANSFER_SHADOW_CASTER_NOPOS_LEGACY(o,o.pos)
 
+    // ********** END **********
 
     // ------------------------------------------------------------------
     //  Alpha helper
@@ -1094,6 +1214,7 @@
     #define UNITY_OPAQUE_ALPHA(outputAlpha) outputAlpha = 1.0
 
 
+    // ********** 与雾效果相关的工具函数和宏 **********
     // ------------------------------------------------------------------
     //  Fog helpers
     //
@@ -1111,51 +1232,77 @@
         #undef FOG_EXP2
     #endif
 
+    /*
+        在计算雾化因子时，需要取得当前片元和摄像机的距离的绝对值，并且离摄像机越远这个值要越大。
+        而这个距离的绝对值要通过片元在裁剪空间中的z值计算得到。
+        在不同平台下，裁剪空间的z取值范围有所不同。
+        所以 UNITY_Z_0_FAR_FROM_CLIPSPACE 宏就是把各个平台的差异化给处理掉。
+    */
     #if defined(UNITY_REVERSED_Z)
         #if UNITY_REVERSED_Z == 1
             //D3d with reversed Z => z clip range is [near, 0] -> remapping to [0, far]
             //max is required to protect ourselves from near plane not being correct/meaningfull in case of oblique matrices.
+            // Z取反的D3d => z片段范围为[near，0]->重新映射为[0，far] 
+            // max是为了保护我们自己免受近平面的影响（如果是倾斜矩阵的话）
             #define UNITY_Z_0_FAR_FROM_CLIPSPACE(coord) max(((1.0-(coord)/_ProjectionParams.y)*_ProjectionParams.z),0)
         #else
             //GL with reversed z => z clip range is [near, -far] -> should remap in theory but dont do it in practice to save some perf (range is close enough)
+            // z反转的GL => z片段范围是[near，-far]
+            // ->理论上应该重新映射，但实际上不要这样做以节省一些性能（范围足够近），直接对坐标值取反即可
             #define UNITY_Z_0_FAR_FROM_CLIPSPACE(coord) max(-(coord), 0)
         #endif
     #elif UNITY_UV_STARTS_AT_TOP
         //D3d without reversed z => z clip range is [0, far] -> nothing to do
+        // 没有反转z的D3d => z剪辑范围是[0，far]-> 什么都不用做
         #define UNITY_Z_0_FAR_FROM_CLIPSPACE(coord) (coord)
     #else
         //Opengl => z clip range is [-near, far] -> should remap in theory but dont do it in practice to save some perf (range is close enough)
+        // 没有z反转的GL => z片段范围是[-near，far]
+        // ->理论上应该重新映射，但实际上不要这样做以节省一些性能（范围足够近）
         #define UNITY_Z_0_FAR_FROM_CLIPSPACE(coord) (coord)
     #endif
 
+    // 不同雾化因子计算方式下UNITY_CALC_FOG_FACTOR_RAW宏的实现
     #if defined(FOG_LINEAR)
+        // 雾化因子线性化衰减
         // factor = (end-z)/(end-start) = z * (-1/(end-start)) + (end/(end-start))
         #define UNITY_CALC_FOG_FACTOR_RAW(coord) float unityFogFactor = (coord) * unity_FogParams.z + unity_FogParams.w
     #elif defined(FOG_EXP)
-        // factor = exp(-density*z)
+        // 雾化因子指数衰减
+        // factor = exp(-density*z)     exp2是以2为底数的指数函数
         #define UNITY_CALC_FOG_FACTOR_RAW(coord) float unityFogFactor = unity_FogParams.y * (coord); unityFogFactor = exp2(-unityFogFactor)
     #elif defined(FOG_EXP2)
+        // 雾化因子指数平方衰减
         // factor = exp(-(density*z)^2)
         #define UNITY_CALC_FOG_FACTOR_RAW(coord) float unityFogFactor = unity_FogParams.x * (coord); unityFogFactor = exp2(-unityFogFactor*unityFogFactor)
     #else
+        // 不启用雾化效果，雾化因子为0
         #define UNITY_CALC_FOG_FACTOR_RAW(coord) float unityFogFactor = 0.0
     #endif
 
+    // 封装了上面的两个宏定义，计算雾化因子
+    // coord -> 未经透视除法的裁剪空间中的坐标值z分量
     #define UNITY_CALC_FOG_FACTOR(coord) UNITY_CALC_FOG_FACTOR_RAW(UNITY_Z_0_FAR_FROM_CLIPSPACE(coord))
 
+    // 利用顶点格式声明中的纹理坐标语义，借用一个纹理坐标寄存器【把雾化因子声明在一个顶点格式结构体中】。
+    // 如果使用 UNITY_FOG_COORDS_ PACKED 宏，则在顶点着色器中计算雾化效果。
     #define UNITY_FOG_COORDS_PACKED(idx, vectype) vectype fogCoord : TEXCOORD##idx;
 
+    // 不同平台下和不同雾化因子计算方式下 UNITY_TRANSFER_FOG 宏定义
     #if defined(FOG_LINEAR) || defined(FOG_EXP) || defined(FOG_EXP2)
         #define UNITY_FOG_COORDS(idx) UNITY_FOG_COORDS_PACKED(idx, float1)
 
         #if (SHADER_TARGET < 30) || defined(SHADER_API_MOBILE)
             // mobile or SM2.0: calculate fog factor per-vertex
+            // 如果使用移动平台或者使用 shade model 2.0 的平台，则在顶点中计算雾化效果
             #define UNITY_TRANSFER_FOG(o,outpos) UNITY_CALC_FOG_FACTOR((outpos).z); o.fogCoord.x = unityFogFactor
             #define UNITY_TRANSFER_FOG_COMBINED_WITH_TSPACE(o,outpos) UNITY_CALC_FOG_FACTOR((outpos).z); o.tSpace1.y = tangentSign; o.tSpace2.y = unityFogFactor
             #define UNITY_TRANSFER_FOG_COMBINED_WITH_WORLD_POS(o,outpos) UNITY_CALC_FOG_FACTOR((outpos).z); o.worldPos.w = unityFogFactor
             #define UNITY_TRANSFER_FOG_COMBINED_WITH_EYE_VEC(o,outpos) UNITY_CALC_FOG_FACTOR((outpos).z); o.eyeVec.w = unityFogFactor
         #else
             // SM3.0 and PC/console: calculate fog distance per-vertex, and fog factor per-pixel
+            // 如果是使用 shader model 3.0 的平台，或者使用 PC 以及一些游戏主机平台，
+            // 就在顶点着色器中计算每个顶点离当前摄像机的距离。在片元着色器中计算雾化因子。
             #define UNITY_TRANSFER_FOG(o,outpos) o.fogCoord.x = (outpos).z
             #define UNITY_TRANSFER_FOG_COMBINED_WITH_TSPACE(o,outpos) o.tSpace2.y = (outpos).z
             #define UNITY_TRANSFER_FOG_COMBINED_WITH_WORLD_POS(o,outpos) o.worldPos.w = (outpos).z
@@ -1169,15 +1316,20 @@
         #define UNITY_TRANSFER_FOG_COMBINED_WITH_EYE_VEC(o,outpos)
     #endif
 
+    // 利用雾的颜色和当前像素的颜色，根据雾化因子进行线性插值运算，得到最终的雾化效果颜色
     #define UNITY_FOG_LERP_COLOR(col,fogCol,fogFac) col.rgb = lerp((fogCol).rgb, (col).rgb, saturate(fogFac))
 
-
+    // 在不同平台上的最终雾化效果的颜色计算方法 UNITY_APPLY_FOG_COLOR 的宏定义
     #if defined(FOG_LINEAR) || defined(FOG_EXP) || defined(FOG_EXP2)
         #if (SHADER_TARGET < 30) || defined(SHADER_API_MOBILE)
             // mobile or SM2.0: fog factor was already calculated per-vertex, so just lerp the color
+            // 在移动平台或者使用 shader model 2.0 的平台中，因为雾化因子已经在顶点着色器中计算过了，
+            // 所以直接在片元着色器中插值以计算雾化效果颜色
             #define UNITY_APPLY_FOG_COLOR(coord,col,fogCol) UNITY_FOG_LERP_COLOR(col,fogCol,(coord).x)
         #else
             // SM3.0 and PC/console: calculate fog factor and lerp fog color
+            //  如果是 PC 或者游戏主机平台，或者是使用 shader model 3.0 的平台将在片元着色器中计算雾化因子，
+            // 然后在片元着色器中通过插值计算雾化效果的颜色
             #define UNITY_APPLY_FOG_COLOR(coord,col,fogCol) UNITY_CALC_FOG_FACTOR((coord).x); UNITY_FOG_LERP_COLOR(col,fogCol,unityFogFactor)
         #endif
         #define UNITY_EXTRACT_FOG(name) float _unity_fogCoord = name.fogCoord
@@ -1197,6 +1349,9 @@
     #else
         #define UNITY_APPLY_FOG(coord,col) UNITY_APPLY_FOG_COLOR(coord,col,unity_FogColor)
     #endif
+
+    // ********** END **********
+
 
     // ------------------------------------------------------------------
     //  TBN helpers
