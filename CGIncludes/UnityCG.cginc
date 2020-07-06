@@ -46,6 +46,7 @@
 
     #if defined(SHADER_API_D3D11) || defined(SHADER_API_PSSL) || defined(SHADER_API_METAL) || defined(SHADER_API_GLCORE) || defined(SHADER_API_GLES3) || defined(SHADER_API_VULKAN) || defined(SHADER_API_SWITCH) // D3D11, D3D12, XB1, PS4, iOS, macOS, tvOS, glcore, gles3, webgl2.0, Switch
         // Real-support for depth-format cube shadow map.
+        // D3D11，D3D12，XB1，PS4，iOS，macOS，tvOS，glcore，gles3，webgl2.0，Switch Real支持深度格式的立方体阴影贴图。
         #define SHADOWS_CUBE_IN_DEPTH_TEX
     #endif
 

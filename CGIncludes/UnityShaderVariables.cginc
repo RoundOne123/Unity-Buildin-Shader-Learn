@@ -162,7 +162,7 @@
 
     // SH lighting environment
     // 球谐函数使用到的参数
-    half4 unity_SHAr;
+    half4 unity_SHAr;       // 前三个分量对应于
     half4 unity_SHAg;
     half4 unity_SHAb;
     half4 unity_SHBr;
