@@ -143,7 +143,7 @@
             // vec是从原点触发，指向立方体上某点位置的连线向量，用于立方体纹理的贴图的采样
             inline float SampleCubeDistance (float3 vec)
             {
-                // 采样_ShadowMapTexture的vec处的深度值
+                // 采样_ShadowMapTexture的vec处的深度值，xxx_LOD 会根据不同的mipmap进行不同精度的采样
                 // 并把一个float4类型的阴影深度值，解码到一个float的浮点数中
                 return UnityDecodeCubeShadowDepth(UNITY_SAMPLE_TEXCUBE_LOD(_ShadowMapTexture, vec, 0));
             }
@@ -152,49 +152,78 @@
         // 上面是定义了 纹理贴图 / （阴影纹理贴图 + 定义了个采样立方体纹理的函数）
         // -> 接下来如何操作呢？
 
+        // vec：当前待判断是否在阴影中的片元在光源空间中的坐标
         inline half UnitySampleShadowmap (float3 vec)
         {
+            // 支持深度格式的立方体纹理
             #if defined(SHADOWS_CUBE_IN_DEPTH_TEX)
+                // 这一部分其实是没看太懂的....
+
+                // 取绝对值
                 float3 absVec = abs(vec);
+                // 取最大的分量
                 float dominantAxis = max(max(absVec.x, absVec.y), absVec.z); // TODO use max3() instead
+                // 应用阴影偏移
+                // .z分量为shadow bias
+                // 0.00001 是相当于近平面一样的作用吗？
                 dominantAxis = max(0.00001, dominantAxis - _LightProjectionParams.z); // shadow bias from point light is apllied here.
+                // 乘 w分量表示的shadow scale bias
                 dominantAxis *= _LightProjectionParams.w; // bias
+                // 将 dominantAxis 投影 到阴影贴图的裁剪空间[0, 1]
+                // mydist这里的话就是取最小的了
                 float mydist = -_LightProjectionParams.x + _LightProjectionParams.y/dominantAxis; // project to shadow map clip space [0; 1]
 
+                // 反转z
                 #if defined(UNITY_REVERSED_Z)
                     mydist = 1.0 - mydist; // depth buffers are reversed! Additionally we can move this to CPP code!
                 #endif
             #else
+                // 长度 * 光源范围的倒数 （光源范围就对应了 光源的视截体吧）
                 float mydist = length(vec) * _LightPositionRange.w;
+                // *shadow scale bias
                 mydist *= _LightProjectionParams.w; // bias
             #endif
+            
+            // 上面就根据传入的参数vec，算出不同情况下所需要的深度值mydist
+            // 不同的平台、条件、设置下 深度的计算方式可能不太一样，所以要对应计算出用于比较的深度mydist
 
+            // 软阴影
             #if defined (SHADOWS_SOFT)
-                float z = 1.0/128.0;
+                float z = 1.0/128.0;    // 偏移的大小
                 float4 shadowVals;
                 // No hardware comparison sampler (ie some mobile + xbox360) : simple 4 tap PCF
+                // 没有硬件比较采样器（某些移动设备 + xbox360）-> 采用简单的4点PCF
                 #if defined (SHADOWS_CUBE_IN_DEPTH_TEX)
+                    // 从四个4采样点采样立方体阴影纹理
                     shadowVals.x = UNITY_SAMPLE_TEXCUBE_SHADOW(_ShadowMapTexture, float4(vec+float3( z, z, z), mydist));
                     shadowVals.y = UNITY_SAMPLE_TEXCUBE_SHADOW(_ShadowMapTexture, float4(vec+float3(-z,-z, z), mydist));
                     shadowVals.z = UNITY_SAMPLE_TEXCUBE_SHADOW(_ShadowMapTexture, float4(vec+float3(-z, z,-z), mydist));
                     shadowVals.w = UNITY_SAMPLE_TEXCUBE_SHADOW(_ShadowMapTexture, float4(vec+float3( z,-z,-z), mydist));
+                    // 求平均值
                     half shadow = dot(shadowVals, 0.25);
+                    // 插值阴影强度
                     return lerp(_LightShadowData.r, 1.0, shadow);
                 #else
-                    // 这是什么骚操作？
                     shadowVals.x = SampleCubeDistance (vec+float3( z, z, z));
                     shadowVals.y = SampleCubeDistance (vec+float3(-z,-z, z));
                     shadowVals.z = SampleCubeDistance (vec+float3(-z, z,-z));
                     shadowVals.w = SampleCubeDistance (vec+float3( z,-z,-z));
+                    // 如果四个采样点的深度值小于当前片元的深度值，在阴影中，取出表示阴影强度的r分量
                     half4 shadows = (shadowVals < mydist.xxxx) ? _LightShadowData.rrrr : 1.0f;
+                    // 求平均值
                     return dot(shadows, 0.25);
                 #endif
-            #else
+            #else       // 未启用柔和（软）阴影
+                // 使用立体深度纹理贴图
                 #if defined (SHADOWS_CUBE_IN_DEPTH_TEX)
+                    // 采样纹理中的深度
                     half shadow = UNITY_SAMPLE_TEXCUBE_SHADOW(_ShadowMapTexture, float4(vec, mydist));
+                    // 进行插值
                     return lerp(_LightShadowData.r, 1.0, shadow);
                 #else
+                    // 采样纹理的深度 -> 解码为float
                     half shadowVal = UnityDecodeCubeShadowDepth(UNITY_SAMPLE_TEXCUBE(_ShadowMapTexture, vec));
+                    // 比较后获得最终的阴影强度
                     half shadow = shadowVal < mydist ? _LightShadowData.r : 1.0;
                     return shadow;
                 #endif
@@ -206,28 +235,38 @@
 
     // ------------------------------------------------------------------
     // Baked shadows
+    // 预烘焙的阴影计算
     // ------------------------------------------------------------------
 
+    // 使用了光照探针的情况下才能使用本函数
     #if UNITY_LIGHT_PROBE_PROXY_VOLUME
 
+        // 这个方法是做什么的？计算衰减？
         half4 LPPV_SampleProbeOcclusion(float3 worldPos)
         {
             const float transformToLocal = unity_ProbeVolumeParams.y;
             const float texelSizeX = unity_ProbeVolumeParams.z;
 
             //The SH coefficients textures and probe occlusion are packed into 1 atlas.
+            // SH系数纹理和探针遮挡打包成1个图集 -> 详见7.7.5节中关于从纹理中取得纹素并解码的部分
             //-------------------------
             //| ShR | ShG | ShB | Occ |
             //-------------------------
 
+            // 判断是在世界空间还是在局部空间中进行计算
             float3 position = (transformToLocal == 1.0f) ? mul(unity_ProbeVolumeWorldToObject, float4(worldPos, 1.0)).xyz : worldPos;
 
             //Get a tex coord between 0 and 1
+            // unity_ProbeVolumeSizeInv.xyz：分别表示光探针代理体的长宽高方向上的纹素个数
+            // 获得本位置点对应的纹理映射坐标
             float3 texCoord = (position - unity_ProbeVolumeMin.xyz) * unity_ProbeVolumeSizeInv.xyz;
 
             // Sample fourth texture in the atlas
             // We need to compute proper U coordinate to sample.
             // Clamp the coordinate otherwize we'll have leaking between ShB coefficients and Probe Occlusion(Occ) info
+            // 在atlas中采样第四个纹理
+            // 我们需要计算适当的U坐标进行采样。
+            // 夹紧坐标否则将在ShB系数和Probe Occlusion（Occ）信息之间泄漏
             texCoord.x = max(texCoord.x * 0.25f + 0.75f, 0.75f + 0.5f * texelSizeX);
 
             return UNITY_SAMPLE_TEX3D_SAMPLER(unity_ProbeVolumeSH, unity_ProbeVolumeSH, texCoord);
@@ -237,36 +276,54 @@
 
     // ------------------------------------------------------------------
     // Used by the forward rendering path
+    // 前向渲染中被使用
+    // --> 用于返回烘焙的阴影的衰减值
+    // lightmapUV：光照贴图的UV坐标
+    // worldPos：待处理的片元在世界坐标系上的位置点
     fixed UnitySampleBakedOcclusion (float2 lightmapUV, float3 worldPos)
     {
+
+        // rawOcclusionMask：记录的是该像素，被灯光影响的情况，如果采样的结果是（1，1，0，1）那么表示这个像素，
+        // 被0、1、3号灯照射到了，但是2号灯，不能照射到
+        // unity_OcclusionMaskSelector记录的是最强的灯光的编号
+
+        // 如果启动了阴影蒙版
         #if defined (SHADOWS_SHADOWMASK)
             #if defined(LIGHTMAP_ON)
+                // 如果启动了光照贴图，则从光照贴图中提取遮蔽蒙版信息（这是个啥）
                 fixed4 rawOcclusionMask = UNITY_SAMPLE_TEX2D(unity_ShadowMask, lightmapUV.xy);
             #else
                 fixed4 rawOcclusionMask = fixed4(1.0, 1.0, 1.0, 1.0);
+                // 如果启用了光照探针
                 #if UNITY_LIGHT_PROBE_PROXY_VOLUME
-                    if (unity_ProbeVolumeParams.x == 1.0)
+                    // 启用了光照探针代理体
+                    if (unity_ProbeVolumeParams.x == 1.0)   
+                    // 从位置点 worldPos 所处的光探针代理体处取得此处的原始遮蔽信息
                     rawOcclusionMask = LPPV_SampleProbeOcclusion(worldPos);
                     else
+                    // 否则就仍从阴影蒙版贴图中取得遮蔽信息
                     rawOcclusionMask = UNITY_SAMPLE_TEX2D(unity_ShadowMask, lightmapUV.xy);
                 #else
                     rawOcclusionMask = UNITY_SAMPLE_TEX2D(unity_ShadowMask, lightmapUV.xy);
                 #endif
             #endif
+            // 这里是根据记录的灯光编号筛选灯光的？
             return saturate(dot(rawOcclusionMask, unity_OcclusionMaskSelector));
 
         #else
 
             //In forward dynamic objects can only get baked occlusion from LPPV, light probe occlusion is done on the CPU by attenuating the light color.
+            //在forward的动态对象只能从LPPV进行烘焙遮挡的情况下，通过减弱光的颜色在CPU上完成光探针遮挡。
             fixed atten = 1.0f;
             #if defined(UNITY_INSTANCING_ENABLED) && defined(UNITY_USE_SHCOEFFS_ARRAYS)
                 // ...unless we are doing instancing, and the attenuation is packed into SHC array's .w component.
+                // ...除非我们正在执行实例化，并且衰减被打包到SHC阵列的.w分量中。
                 atten = unity_SHC.w;
             #endif
 
             #if UNITY_LIGHT_PROBE_PROXY_VOLUME && !defined(LIGHTMAP_ON) && !UNITY_STANDARD_SIMPLE
                 fixed4 rawOcclusionMask = atten.xxxx;
-                if (unity_ProbeVolumeParams.x == 1.0)
+                if (unity_ProbeVolumeParams.x == 1.0)   // 启用
                 rawOcclusionMask = LPPV_SampleProbeOcclusion(worldPos);
                 return saturate(dot(rawOcclusionMask, unity_OcclusionMaskSelector));
             #endif

@@ -398,6 +398,8 @@
         // x = Disabled(0)/Enabled(1)
         // y = Computation are done in global space(0) or local space(1)
         // z = Texel size on U texture coordinate
+        // y = 计算是在全局空间（0）还是本地空间（1）计算的
+        // z = U纹理坐标上的Texel大小
         float4 unity_ProbeVolumeParams;
 
         float4x4 unity_ProbeVolumeWorldToObject;
