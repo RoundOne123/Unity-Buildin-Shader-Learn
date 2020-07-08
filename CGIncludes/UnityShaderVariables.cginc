@@ -172,7 +172,9 @@
 
     // part of Light because it can be used outside of shadow distance
     // 光照探针相关的参数
+    // unity_OcclusionMaskSelector：用来控制当前渲染的光源中那些通道可用
     fixed4 unity_OcclusionMaskSelector;
+    // 过C#层提供的API：MaterialPropertyBlock.CopyProbeOcculusionArrayFrom，可以从客户端填充此值
     fixed4 unity_ProbesOcclusion;
     CBUFFER_END
 

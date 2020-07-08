@@ -325,6 +325,10 @@
                 fixed4 rawOcclusionMask = atten.xxxx;
                 if (unity_ProbeVolumeParams.x == 1.0)   // 启用
                 rawOcclusionMask = LPPV_SampleProbeOcclusion(worldPos);
+                // unity_OcclusionMaskSelector：用来控制当前渲染的光源中那些通道可用
+                // 阴影蒙版中的每一个纹素中，存储着它对应场景某个位置点上至多4个光源在此的遮挡信息
+                // 即记录着这一点中有多少个光源能照的到，多少个光源照不到的信息
+                // dot 操作 unity_OcclusionMaskSelector 就是用来控制这些遮挡信息
                 return saturate(dot(rawOcclusionMask, unity_OcclusionMaskSelector));
             #endif
 
@@ -334,12 +338,16 @@
 
     // ------------------------------------------------------------------
     // Used by the deferred rendering path (in the gbuffer pass)
+    // 在延迟渲染的GBuffer中使用
+    // 和 UnitySampleBakedOcclusion 功能相似，不同之处在于它没有使用 unity_OcclusionMaskSelector 变量选择其中的通道
     fixed4 UnityGetRawBakedOcclusions(float2 lightmapUV, float3 worldPos)
     {
         #if defined (SHADOWS_SHADOWMASK)
             #if defined(LIGHTMAP_ON)
                 return UNITY_SAMPLE_TEX2D(unity_ShadowMask, lightmapUV.xy);
             #else
+                // unity_ProbesOcclusion ：在UnityShaderVariables.cginc文件中定义，
+                // 通过C#层提供的API：MaterialPropertyBlock.CopyProbeOcculusionArrayFrom，可以从客户端填充此值
                 half4 probeOcclusion = unity_ProbesOcclusion;
 
                 #if UNITY_LIGHT_PROBE_PROXY_VOLUME
@@ -356,78 +364,106 @@
 
     // ------------------------------------------------------------------
     // Used by both the forward and the deferred rendering path
+    // 可用于前向渲染路径和延迟渲染路径
+    // 可以对实时阴影和烘焙阴影进行混合 --> 最终返回值，是用于和当前阴影相乘的类似强度一样的概念？
+    // 主要算法思想是：按照平常的做法衰减实时阴影，然后取其和烘焙阴影的最小值
     half UnityMixRealtimeAndBakedShadows(half realtimeShadowAttenuation, half bakedShadowAttenuation, half fade)
     {
-        // -- Static objects --
-        // FWD BASE PASS
+        // -- Static objects 静态物体 --
+        // FWD BASE PASS    前向渲染 base
         // ShadowMask mode          = LIGHTMAP_ON + SHADOWS_SHADOWMASK + LIGHTMAP_SHADOW_MIXING
         // Distance shadowmask mode = LIGHTMAP_ON + SHADOWS_SHADOWMASK
         // Subtractive mode         = LIGHTMAP_ON + LIGHTMAP_SHADOW_MIXING
         // Pure realtime direct lit = LIGHTMAP_ON
 
-        // FWD ADD PASS
+        // FWD ADD PASS     前向渲染 add
         // ShadowMask mode          = SHADOWS_SHADOWMASK + LIGHTMAP_SHADOW_MIXING
         // Distance shadowmask mode = SHADOWS_SHADOWMASK
         // Pure realtime direct lit = LIGHTMAP_ON
 
-        // DEFERRED LIGHTING PASS
+        // DEFERRED LIGHTING PASS   延迟光照
         // ShadowMask mode          = LIGHTMAP_ON + SHADOWS_SHADOWMASK + LIGHTMAP_SHADOW_MIXING
         // Distance shadowmask mode = LIGHTMAP_ON + SHADOWS_SHADOWMASK
         // Pure realtime direct lit = LIGHTMAP_ON
 
-        // -- Dynamic objects --
-        // FWD BASE PASS + FWD ADD ASS
+        // -- Dynamic objects 动态物体 --
+        // FWD BASE PASS + FWD ADD ASS      前向渲染
         // ShadowMask mode          = LIGHTMAP_SHADOW_MIXING
         // Distance shadowmask mode = N/A
         // Subtractive mode         = LIGHTMAP_SHADOW_MIXING (only matter for LPPV. Light probes occlusion being done on CPU)
         // Pure realtime direct lit = N/A
 
-        // DEFERRED LIGHTING PASS
+        // DEFERRED LIGHTING PASS           延迟光照
         // ShadowMask mode          = SHADOWS_SHADOWMASK + LIGHTMAP_SHADOW_MIXING
         // Distance shadowmask mode = SHADOWS_SHADOWMASK
         // Pure realtime direct lit = N/A
 
+        // 如果基于深度贴图的阴影、基于屏幕空间的阴影、基于立方体纹理的阴影这三者都没有打开
         #if !defined(SHADOWS_DEPTH) && !defined(SHADOWS_SCREEN) && !defined(SHADOWS_CUBE)
             #if defined(LIGHTMAP_ON) && defined (LIGHTMAP_SHADOW_MIXING) && !defined (SHADOWS_SHADOWMASK)
+                // 如果没有使用蒙版阴影
                 //In subtractive mode when there is no shadow we kill the light contribution as direct as been baked in the lightmap.
+                // 在 subtractive 模式，当没有阴影时，我们将消除光照贡献，使得就像直接在光照贴图中烘焙的一样
                 return 0.0;
             #else
+                // 使用了阴影蒙版，直接返回预烘焙的衰减值
                 return bakedShadowAttenuation;
             #endif
         #endif
 
         #if (SHADER_TARGET <= 20) || UNITY_STANDARD_SIMPLE
             //no fading nor blending on SM 2.0 because of instruction count limit.
+            // 如果shade model不大于2.0，则不进行 fading（衰减？淡出更合理吧） 或者 blending操作
             #if defined(SHADOWS_SHADOWMASK) || defined(LIGHTMAP_SHADOW_MIXING)
+                // 取实时阴影和烘焙阴影的最小值
                 return min(realtimeShadowAttenuation, bakedShadowAttenuation);
             #else
+                // 直接返回实时阴影的衰减值
                 return realtimeShadowAttenuation;
             #endif
         #endif
 
         #if defined(LIGHTMAP_SHADOW_MIXING)
             //Subtractive or shadowmask mode
+            // 实时阴影 + fade（淡化参数）后，将它限制在[0,1]范围内
             realtimeShadowAttenuation = saturate(realtimeShadowAttenuation + fade);
+            // 然后将它和预烘焙阴影衰减值进行比较，返回较小值
             return min(realtimeShadowAttenuation, bakedShadowAttenuation);
         #endif
 
         //In distance shadowmask or realtime shadow fadeout we lerp toward the baked shadows (bakedShadowAttenuation will be 1 if no baked shadows)
+        // 在远距离阴影遮罩或实时阴影淡出中，我们朝着烘焙的阴影方向进行插值（如果没有烘焙的阴影，bakedShadowAttenuation将为1）
+        // 根据淡化参数在实时阴影衰减值和预烘焙阴影衰减值之间进行线性插值
         return lerp(realtimeShadowAttenuation, bakedShadowAttenuation, fade);
     }
 
     // ------------------------------------------------------------------
     // Shadow fade
+    // 阴影淡化的处理
     // ------------------------------------------------------------------
 
+    // 根据当前片元到摄像机的距离值，计算阴影的淡化程度
+    // wpos：待计算的当前片元在世界坐标系下的位置坐标值
+    // z：待计算的当前片元在世界坐标系下到当前摄像机的距离
     float UnityComputeShadowFadeDistance(float3 wpos, float z)
     {
+        // unity_ShadowFadeCenterAndType ：包含了阴影的中心和阴影的类型
+
+        // 计算距离
         float sphereDist = distance(wpos, unity_ShadowFadeCenterAndType.xyz);
+        // 使用w分量进行插值，w分量是啥？0或1 
         return lerp(z, sphereDist, unity_ShadowFadeCenterAndType.w);
     }
 
     // ------------------------------------------------------------------
+    // 计算阴影淡化程度
     half UnityComputeShadowFade(float fadeDist)
     {
+        // _LightShadowData 的各分量 书上的解释，不一定正确，具体可以查看一下网上的资料
+        // x：表示阴影的强度，1表示全黑，0表示完全透明不黑
+        // y：暂时未被使用
+        // z：当z分量为1除以需要渲染的阴影时，表示阴影离当前摄像机的最远距离值
+        // w：表示阴影离摄像机的最近距离值
         return saturate(fadeDist * _LightShadowData.z + _LightShadowData.w);
     }
 
@@ -442,16 +478,30 @@
     *   http://mynameismjp.wordpress.com/2013/09/10/shadow-maps/
     *   http://amd-dev.wpengine.netdna-cdn.com/wordpress/media/2012/10/Isidoro-ShadowMapping.pdf
     */
+    // 根据给定的在屏幕空间的阴影坐标值，计算【阴影接受平面】的深度偏移值
     float3 UnityGetReceiverPlaneDepthBias(float3 shadowCoord, float biasMultiply)
     {
         // Should receiver plane bias be used? This estimates receiver slope using derivatives,
         // and tries to tilt the PCF kernel along it. However, when doing it in screenspace from the depth texture
         // (ie all light in deferred and directional light in both forward and deferred), the derivatives are wrong
         // on edges or intersections of objects, leading to shadow artifacts. Thus it is disabled by default.
+        /*
+        是否应使用接收器平面偏置？ 这使用导数估算接收器的斜率，并尝试使PCF内核沿其倾斜。
+        但是，当从深度纹理在屏幕空间中进行操作时（即，所有延迟和定向光都在正向和延迟中），
+        导数在对象的边缘或相交处是错误的，从而导致阴影伪影。 因此，默认情况下它是禁用的。
+        */
         float3 biasUVZ = 0;
 
+        /*
+        现代 GPU 为了提高效率，会同时对至少 4 个片元进行并行处理。而且这 4 个片元一般以 2×2 的方式组织排列。
+        在实际计算中，计算某一片元与它水平（或垂直）方向上的邻接片元的属性（如它的纹理坐标）的一阶差分值，
+        便可以近似等于该片元在水平（或垂直）方向上的【导数】。这个计算水平（或垂直）一阶差分值（或者称导数值），
+        在 Cg/HLSL 平台上用 ddx[2]（或 ddy）函数计算，在 GLSL 平台上用 dFdx（或 dFdy）函数计算。
+        因为 ddx/ddy（或 dFdx/dFdy）函数需要用到片元的属性，因此只能在片元着色器中使用它们。
+        */
         #if defined(UNITY_USE_RECEIVER_PLANE_BIAS) && defined(SHADOWMAPSAMPLER_AND_TEXELSIZE_DEFINED)
-            float3 dx = ddx(shadowCoord);
+            // 得到当前纹理坐标点与水平方向的邻居坐标点
+            float3 dx = ddx(shadowCoord);   // 计算水平方向 shadowCoord 的一阶差分值，近似等于该片元在水平方向上的导数
             float3 dy = ddy(shadowCoord);
 
             biasUVZ.x = dy.y * dx.z - dx.y * dy.z;
@@ -459,6 +509,7 @@
             biasUVZ.xy *= biasMultiply / ((dx.x * dy.y) - (dx.y * dy.x));
 
             // Static depth biasing to make up for incorrect fractional sampling on the shadow map grid.
+            // 静态深度偏差可弥补阴影贴图网格上不正确的分数采样
             const float UNITY_RECEIVER_PLANE_MIN_FRACTIONAL_ERROR = 0.01f;
             float fractionalSamplingError = dot(_ShadowMapTexture_TexelSize.xy, abs(biasUVZ.xy));
             biasUVZ.z = -min(fractionalSamplingError, UNITY_RECEIVER_PLANE_MIN_FRACTIONAL_ERROR);
@@ -474,8 +525,14 @@
     * Combines the different components of a shadow coordinate and returns the final coordinate.
     * See UnityGetReceiverPlaneDepthBias
     */
+    // 组合一个阴影坐标的不同分量并返回最后一下分量
+    // baseUV：本采样点对应的阴影贴图uv坐标
+    // deltaUV：本采样点对应的uv左边的偏移量
+    // depth：本采样点存储的深度值
+    // receiverPlaneDepthBias：接受阴影投射的平面的深度偏差值
     float3 UnityCombineShadowcoordComponents(float2 baseUV, float2 deltaUV, float depth, float3 receiverPlaneDepthBias)
     {
+        // 阴影贴图的 uv 采样坐标，还有对应的深度值都加上偏移值
         float3 uv = float3(baseUV + deltaUV, depth + receiverPlaneDepthBias.z);
         uv.z += dot(deltaUV, receiverPlaneDepthBias.xy);
         return uv;
@@ -483,7 +540,14 @@
 
     // ------------------------------------------------------------------
     //  PCF Filtering helpers
+    //  用于进行PCF过滤的辅助函数
     // ------------------------------------------------------------------
+
+    /*
+    Unity 3D 引擎使用了若干不同规格的等腰直角三角形，在 4 阶、6 阶、8 阶采样内核上进行覆盖，
+    以获取不同纹素对阴影的贡献程度，然后遵循n阶采样内核执行次采样的规则进行 PCF 处理。
+    下面的代码就是进行 PCF 操作的一系列工具函数。
+    */
 
     /**
     * Assuming a isoceles rectangle triangle of height "triangleHeight" (as drawn below).
@@ -493,6 +557,12 @@
     * | \
     * ----    <-- length of this side is "triangleHeight"
     * _ _ _ _ <-- texels
+    */
+    // 
+    /*
+    此函数返回第一个纹理像素上方的三角形面积：
+    个人理解：
+    这里返回的是【第一个纹理像素】这一列上的图形（三角形，更多情况下是个梯形）面积。
     */
     float _UnityInternalGetAreaAboveFirstTexelUnderAIsocelesRectangleTriangle(float triangleHeight)
     {
@@ -508,39 +578,61 @@
     * _ _ _ _ <-- texels
     * X Y Z W <-- result indices (in computedArea.xyzw and computedAreaUncut.xyzw)
     */
+    /*
+    本函数假定本等腰三角形的高为1.5纹素，底为3纹素，共占据了4个纹素点，
+    本函数返回这4个纹素点分割了多少面积
+    offset：取值范围是[-0.5, 0.5]，为0时表示三角形居中
+    */
     void _UnityInternalGetAreaPerTexel_3TexelsWideTriangleFilter(float offset, out float4 computedArea, out float4 computedAreaUncut)
     {
-        //Compute the exterior areas
+        //Compute the exterior areas  计算两边（x、w）区域
+        // 假设 offset 为 0，则 offset01SquaredHalved 为 0.125
+        // computedAreaUncut.x 和 computedArea.x 为 0.125
+        // computedAreaUncut.w 和 computedArea.w 也为 0.125
+        // 假设 offset 为 0.5，则 offset01SquaredHalved 为 0.5
+        // computedAreaUncut.x 和 computedArea.x 为 0
+        // computedAreaUncut.w 和 computedArea.w 也为 0
         float offset01SquaredHalved = (offset + 0.5) * (offset + 0.5) * 0.5;
         computedAreaUncut.x = computedArea.x = offset01SquaredHalved - offset;
         computedAreaUncut.w = computedArea.w = offset01SquaredHalved;
 
-        //Compute the middle areas
+        //Compute the middle areas  计算中间区域
         //For Y : We find the area in Y of as if the left section of the isoceles triangle would
         //intersect the axis between Y and Z (ie where offset = 0).
+        // 对于Y：我们在Y中找到等腰三角形的左部分将与Y和Z之间的轴相交的区域（即，偏移= 0）
         computedAreaUncut.y = _UnityInternalGetAreaAboveFirstTexelUnderAIsocelesRectangleTriangle(1.5 - offset);
         //This area is superior to the one we are looking for if (offset < 0) thus we need to
         //subtract the area of the triangle defined by (0,1.5-offset), (0,1.5+offset), (-offset,1.5).
+        // 如果（offset <0），则此区域大于我们要查找的区域，
+        // 因此我们需要减去由（0,1.5-offset），（0,1.5 + offset）， (-offset,1.5)定义的三角形的面积。
+        //当 offset 等于 0 时，computedAreaUncut.y 为 1
+        //当 offset 等于 0.5 时，computedAreaUncut.y 为 0.5.
         float clampedOffsetLeft = min(offset,0);
         float areaOfSmallLeftTriangle = clampedOffsetLeft * clampedOffsetLeft;
-        computedArea.y = computedAreaUncut.y - areaOfSmallLeftTriangle;
+        computedArea.y = computedAreaUncut.y - areaOfSmallLeftTriangle;     // 这里就是求y（-1，0）区域的面积
 
         //We do the same for the Z but with the right part of the isoceles triangle
+        // 对等腰三角形的右边执行相同的操作，并将其保存到z分量中
+        // 当 offset 为 0 时，computedAreaUncut.y 和 computedArea.y 都为 1
         computedAreaUncut.z = _UnityInternalGetAreaAboveFirstTexelUnderAIsocelesRectangleTriangle(1.5 + offset);
-        float clampedOffsetRight = max(offset,0);
+        float clampedOffsetRight = max(offset,0);   // 这里是max
         float areaOfSmallRightTriangle = clampedOffsetRight * clampedOffsetRight;
-        computedArea.z = computedAreaUncut.z - areaOfSmallRightTriangle;
+        computedArea.z = computedAreaUncut.z - areaOfSmallRightTriangle;    // 这里就是求（0，1）区域的面积
     }
 
     /**
     * Assuming a isoceles triangle of 1.5 texels height and 3 texels wide lying on 4 texels.
     * This function return the weight of each texels area relative to the full triangle area.
     */
+    /*
+    本函数假定等腰直角三角形的高为 1.5 纹素，底为 3 纹素，该三角形覆盖在 4 个纹素点上
+    本函数将求出每个纹素点那一列的三角形的面积，并求出各部分面积占总面积的【比例】
+    */
     void _UnityInternalGetWeightPerTexel_3TexelsWideTriangleFilter(float offset, out float4 computedWeight)
     {
         float4 dummy;
         _UnityInternalGetAreaPerTexel_3TexelsWideTriangleFilter(offset, computedWeight, dummy);
-        computedWeight *= 0.44444;//0.44 == 1/(the triangle area)
+        computedWeight *= 0.44444;//0.44 == 1/(the triangle area)  0.44444 就是 总面积的倒数  相当于除总面积
     }
 
     /**
@@ -549,6 +641,10 @@
     *  /       \
     * _ _ _ _ _ _ <-- texels
     * 0 1 2 3 4 5 <-- computed area indices (in texelsWeights[])
+    */
+    /*
+    本函数假定一个等腰直角三角形的高为 2.5 纹素，底为 5 纹素，该三角形覆盖在 6 个纹素点上；
+    本函数将求出每个纹素点那一列的三角形的面积，并求出各部分面积占总面积的【比例】
     */
     void _UnityInternalGetWeightPerTexel_5TexelsWideTriangleFilter(float offset, out float3 texelsWeightsA, out float3 texelsWeightsB)
     {
@@ -559,7 +655,9 @@
 
         //Triangle slop is 45 degree thus we can almost reuse the result of the 3 texel wide computation.
         //the 5 texel wide triangle can be seen as the 3 texel wide one but shifted up by one unit/texel.
-        //0.16 is 1/(the triangle area)
+        // 三角形斜率是45度，因此我们几乎可以重用3 texel宽的计算结果。 
+        // 5 texel宽的三角形可以看作是3 texel宽的三角形，但向上移动了一个单位/ texel。
+        //0.16 is 1/(the triangle area) // 0.16 是总面积的倒数
         texelsWeightsA.x = 0.16 * (computedArea_From3texelTriangle.x);
         texelsWeightsA.y = 0.16 * (computedAreaUncut_From3texelTriangle.y);
         texelsWeightsA.z = 0.16 * (computedArea_From3texelTriangle.y + 1);
@@ -575,6 +673,10 @@
     * _ _ _ _ _ _ _ _ <-- texels
     * 0 1 2 3 4 5 6 7 <-- computed area indices (in texelsWeights[])
     */
+    /*
+    本函数假定一个等腰直角三角形的高为 3.5 纹素，底为 7 纹素，该三角形覆盖在 8 个纹素点上
+    本函数将求出每个纹素点那一列的三角形的面积，并求出各部分面积占总面积的【比例】
+    */
     void _UnityInternalGetWeightPerTexel_7TexelsWideTriangleFilter(float offset, out float4 texelsWeightsA, out float4 texelsWeightsB)
     {
         //See _UnityInternalGetAreaPerTexel_3TexelTriangleFilter for details.
@@ -584,7 +686,9 @@
 
         //Triangle slop is 45 degree thus we can almost reuse the result of the 3 texel wide computation.
         //the 7 texel wide triangle can be seen as the 3 texel wide one but shifted up by two unit/texel.
-        //0.081632 is 1/(the triangle area)
+        // 三角形斜率是45度，因此我们几乎可以重用3 texel宽的计算结果。
+        // 7 texel宽的三角形可以看成是3 texel宽的三角形，但向上移动了两个单位/ texel
+        //0.081632 is 1/(the triangle area) // 0.081632 是总面积的倒数
         texelsWeightsA.x = 0.081632 * (computedArea_From3texelTriangle.x);
         texelsWeightsA.y = 0.081632 * (computedAreaUncut_From3texelTriangle.y);
         texelsWeightsA.z = 0.081632 * (computedAreaUncut_From3texelTriangle.y + 1);
@@ -597,10 +701,12 @@
 
     // ------------------------------------------------------------------
     //  PCF Filtering
+    //  PCF过滤相关的函数
     // ------------------------------------------------------------------
 
     /**
     * PCF gaussian shadowmap filtering based on a 3x3 kernel (9 taps no PCF hardware support)
+    * 基于3x3内核的PCF高斯阴影贴图过滤（没有PCF硬件支持，没有优化，采样9次）
     */
     half UnitySampleShadowmap_PCF3x3NoHardwareSupport(float4 coord, float3 receiverPlaneDepthBias)
     {
@@ -609,6 +715,8 @@
         #ifdef SHADOWMAPSAMPLER_AND_TEXELSIZE_DEFINED
             // when we don't have hardware PCF sampling, then the above 5x5 optimized PCF really does not work.
             // Fallback to a simple 3x3 sampling with averaged results.
+            // 当我们没有硬件PCF采样时，上述5x5优化的PCF确实不起作用。
+            // 退回到具有平均结果的简单3x3采样。
             float2 base_uv = coord.xy;
             float2 ts = _ShadowMapTexture_TexelSize.xy;
             shadow = 0;
@@ -629,6 +737,10 @@
 
     /**
     * PCF tent shadowmap filtering based on a 3x3 kernel (optimized with 4 taps)
+    * 基于3x3内核的PCF帐篷（tent）阴影贴图过滤（优化成只要采样4次）
+    */
+    /*
+    没看懂...
     */
     half UnitySampleShadowmap_PCF3x3Tent(float4 coord, float3 receiverPlaneDepthBias)
     {
@@ -637,32 +749,47 @@
         #ifdef SHADOWMAPSAMPLER_AND_TEXELSIZE_DEFINED
 
             #ifndef SHADOWS_NATIVE
+                // 硬件不支持时，退回 UnitySampleShadowmap_PCF3x3NoHardwareSupport 
                 // when we don't have hardware PCF sampling, fallback to a simple 3x3 sampling with averaged results.
                 return UnitySampleShadowmap_PCF3x3NoHardwareSupport(coord, receiverPlaneDepthBias);
             #endif
 
             // tent base is 3x3 base thus covering from 9 to 12 texels, thus we need 4 bilinear PCF fetches
+            // 帐篷（tent）底是3x3底，因此覆盖9到12像素，因此我们需要4个双线性PCF提取 ？？？
+            // ->
+            // 把单位化纹理映射坐标转为纹素坐标，
+            // _ShadowMapTexture_TexelSize.zw，为阴影贴图的长和宽方向各自的纹素个数
             float2 tentCenterInTexelSpace = coord.xy * _ShadowMapTexture_TexelSize.zw;
+            // 向下取整
             float2 centerOfFetchesInTexelSpace = floor(tentCenterInTexelSpace + 0.5);
+            // 计算tent中点 到fetch中点 的偏移值
             float2 offsetFromTentCenterToCenterOfFetches = tentCenterInTexelSpace - centerOfFetchesInTexelSpace;
 
             // find the weight of each texel based
+            // 求出基于每个纹素的权重
+            // 判断每个纹素所占有的部分三角形的权重   为什么分成uv两个方向？
             float4 texelsWeightsU, texelsWeightsV;
             _UnityInternalGetWeightPerTexel_3TexelsWideTriangleFilter(offsetFromTentCenterToCenterOfFetches.x, texelsWeightsU);
             _UnityInternalGetWeightPerTexel_3TexelsWideTriangleFilter(offsetFromTentCenterToCenterOfFetches.y, texelsWeightsV);
 
             // each fetch will cover a group of 2x2 texels, the weight of each group is the sum of the weights of the texels
+            // 每次提取会覆盖一组的2x2的纹素，该组的权重是纹素权重的和
             float2 fetchesWeightsU = texelsWeightsU.xz + texelsWeightsU.yw;
             float2 fetchesWeightsV = texelsWeightsV.xz + texelsWeightsV.yw;
 
             // move the PCF bilinear fetches to respect texels weights
+            // 移动PCF双线性获取以尊重（？？）纹素权重
             float2 fetchesOffsetsU = texelsWeightsU.yw / fetchesWeightsU.xy + float2(-1.5,0.5);
             float2 fetchesOffsetsV = texelsWeightsV.yw / fetchesWeightsV.xy + float2(-1.5,0.5);
             fetchesOffsetsU *= _ShadowMapTexture_TexelSize.xx;
             fetchesOffsetsV *= _ShadowMapTexture_TexelSize.yy;
 
             // fetch !
+            // 采样点开始的纹理贴图坐标
             float2 bilinearFetchOrigin = centerOfFetchesInTexelSpace * _ShadowMapTexture_TexelSize.xy;
+            // fetchesWeightsU.x 对应于 x0，fetchesWeightsU.y 对应于 x1
+            // fetchesWeightsV.x 对应于 y0，fetchesWeightsV.y 对应于 y1
+            // 双线性过滤
             shadow =  fetchesWeightsU.x * fetchesWeightsV.x * UNITY_SAMPLE_SHADOW(_ShadowMapTexture, UnityCombineShadowcoordComponents(bilinearFetchOrigin, float2(fetchesOffsetsU.x, fetchesOffsetsV.x), coord.z, receiverPlaneDepthBias));
             shadow += fetchesWeightsU.y * fetchesWeightsV.x * UNITY_SAMPLE_SHADOW(_ShadowMapTexture, UnityCombineShadowcoordComponents(bilinearFetchOrigin, float2(fetchesOffsetsU.y, fetchesOffsetsV.x), coord.z, receiverPlaneDepthBias));
             shadow += fetchesWeightsU.x * fetchesWeightsV.y * UNITY_SAMPLE_SHADOW(_ShadowMapTexture, UnityCombineShadowcoordComponents(bilinearFetchOrigin, float2(fetchesOffsetsU.x, fetchesOffsetsV.y), coord.z, receiverPlaneDepthBias));
@@ -674,6 +801,7 @@
 
     /**
     * PCF tent shadowmap filtering based on a 5x5 kernel (optimized with 9 taps)
+    * 参考 3x3
     */
     half UnitySampleShadowmap_PCF5x5Tent(float4 coord, float3 receiverPlaneDepthBias)
     {
@@ -725,6 +853,7 @@
 
     /**
     * PCF tent shadowmap filtering based on a 7x7 kernel (optimized with 16 taps)
+    * 参考 3x3
     */
     half UnitySampleShadowmap_PCF7x7Tent(float4 coord, float3 receiverPlaneDepthBias)
     {
