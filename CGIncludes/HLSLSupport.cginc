@@ -804,7 +804,7 @@
         #define DYNAMICLIGHTMAP_OFF 1
     #endif
 
-
+    // 如果启用了和立体渲染相关的宏
     #if defined(UNITY_STEREO_INSTANCING_ENABLED) || defined(UNITY_STEREO_MULTIVIEW_ENABLED)
 
         #undef UNITY_DECLARE_DEPTH_TEXTURE_MS
@@ -831,6 +831,7 @@
         #undef SAMPLE_RAW_DEPTH_TEXTURE_LOD
         #define SAMPLE_RAW_DEPTH_TEXTURE_LOD(sampler, uv) UNITY_SAMPLE_TEX2DARRAY_LOD(sampler, float3((uv).xy, (float)unity_StereoEyeIndex), (uv).w)
 
+        // 基于屏幕空间的screen space的阴影贴图 及其 采样方法
         #define UNITY_DECLARE_SCREENSPACE_SHADOWMAP UNITY_DECLARE_TEX2DARRAY
         #define UNITY_SAMPLE_SCREEN_SHADOW(tex, uv) UNITY_SAMPLE_TEX2DARRAY( tex, float3((uv).x/(uv).w, (uv).y/(uv).w, (float)unity_StereoEyeIndex) ).r
 
@@ -839,8 +840,11 @@
     #else
         #define UNITY_DECLARE_DEPTH_TEXTURE_MS(tex)  Texture2DMS<float> tex;
         #define UNITY_DECLARE_DEPTH_TEXTURE(tex) sampler2D_float tex
+
+        // 基于屏幕空间的screen space的阴影贴图（就是一个普通的sampler2D类型） 及其 采样方法
         #define UNITY_DECLARE_SCREENSPACE_SHADOWMAP(tex) sampler2D tex
         #define UNITY_SAMPLE_SCREEN_SHADOW(tex, uv) tex2Dproj( tex, UNITY_PROJ_COORD(uv) ).r
+
         #define UNITY_DECLARE_SCREENSPACE_TEXTURE(tex) sampler2D tex;
         #define UNITY_SAMPLE_SCREENSPACE_TEXTURE(tex, uv) tex2D(tex, uv)
     #endif

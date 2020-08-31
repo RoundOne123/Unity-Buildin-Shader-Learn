@@ -916,6 +916,11 @@
     * Algorithm: http://the-witness.net/news/2013/09/shadow-mapping-summary-part-1/
     * Implementation example: http://mynameismjp.wordpress.com/2013/09/10/shadow-maps/
     */
+    /*
+    高斯模糊是根据高斯公式先计算出周围片元对需要模糊的那个片元的影响程度，即权重值，
+    然后对图像中该像素的颜色值进行卷积计算，最后得到该片元的颜色值。
+    */
+    // 在 PCF 采样的基础上，用高斯模糊算法重建了各采样点的权重值
     half UnitySampleShadowmap_PCF3x3Gaussian(float4 coord, float3 receiverPlaneDepthBias)
     {
         half shadow = 1;
@@ -927,6 +932,7 @@
                 return UnitySampleShadowmap_PCF3x3NoHardwareSupport(coord, receiverPlaneDepthBias);
             #endif
 
+            // 求得每个采样点得权重
             const float2 offset = float2(0.5, 0.5);
             float2 uv = (coord.xy * _ShadowMapTexture_TexelSize.zw) + offset;
             float2 base_uv = (floor(uv) - offset) * _ShadowMapTexture_TexelSize.xy;
@@ -959,6 +965,7 @@
     * Algorithm: http://the-witness.net/news/2013/09/shadow-mapping-summary-part-1/
     * Implementation example: http://mynameismjp.wordpress.com/2013/09/10/shadow-maps/
     */
+    // 参考 xxx3x3xxx
     half UnitySampleShadowmap_PCF5x5Gaussian(float4 coord, float3 receiverPlaneDepthBias)
     {
         half shadow = 1;
@@ -1006,6 +1013,7 @@
         return shadow;
     }
 
+    // 转调 xxxTent
     half UnitySampleShadowmap_PCF3x3(float4 coord, float3 receiverPlaneDepthBias)
     {
         return UnitySampleShadowmap_PCF3x3Tent(coord, receiverPlaneDepthBias);
